@@ -25,7 +25,7 @@ uploaded_file = st.file_uploader("Upload a video", type=["mp4"])
 def process_video(model_path, input_video_path):
     model = YOLO(model_path)
     device='cuda' if torch.cuda.is_available() else 'cpu'
-    model.to('device') 
+    model.to(device) 
     class_list = model.names
     cap = cv2.VideoCapture(input_video_path)
     
