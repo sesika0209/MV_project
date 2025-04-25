@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import torch
 
 st.title("YOLO11 vs YOLO12 Object Detection")
-print("Current device:", torch.cuda.current_device() if torch.cuda.is_available() else "CPU")
+
 
 #  Model selection
 model_choice = st.sidebar.selectbox("Choose YOLO Model", ["YOLO11", "YOLO12"])
@@ -24,7 +24,8 @@ uploaded_file = st.file_uploader("Upload a video", type=["mp4"])
 # Metrics for performance
 def process_video(model_path, input_video_path):
     model = YOLO(model_path)
-    model.to('cuda') 
+    device='cuda' if torch.cuda.is_available() else 'cpu'
+    model.to('device') 
     class_list = model.names
     cap = cv2.VideoCapture(input_video_path)
     
