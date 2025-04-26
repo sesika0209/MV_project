@@ -1,121 +1,185 @@
-# streamlit_app.py
-
 import streamlit as st
 import cv2
-import tempfile
 import time
+import tempfile
+import os
+import numpy as np
+import pandas as pd
 from collections import defaultdict
 from ultralytics import YOLO
-import psutil
-import os
-import plotly.graph_objects as go
-import torch
+import matplotlib.pyplot as plt
+import ffmpeg
 
-st.title("YOLO11 vs YOLO12 Object Detection")
+st.set_page_config(page_title="YOLO11 vs YOLO12 Vehicle Counting", layout="wide")
+st.title("YOLO11 vs YOLO12: Vehicle Detection & Counting")
 
+# Video re-encoding for browser playback
+def reencode_video(input_path, output_path):
+    try:
+        stream = ffmpeg.input(input_path)
+        stream = ffmpeg.output(stream, output_path, vcodec='libx264', acodec='aac', format='mp4', pix_fmt='yuv420p')
+        ffmpeg.run(stream, overwrite_output=True, quiet=True)
+        return True
+    except ffmpeg.Error:
+        return False
 
-#  Model selection
-model_choice = st.sidebar.selectbox("Choose YOLO Model", ["YOLO11", "YOLO12"])
-model_path = "yolo11l.pt" if model_choice == "YOLO11" else "yolo12l.pt"
+# Process video using YOLO
+def process_video(video_path, model_name, output_path, class_filter):
+    try:
+        model = YOLO(f"{model_name}.pt")
+    except FileNotFoundError:
+        st.error(f"Model {model_name}.pt not found.")
+        return None, None, None
 
-# Upload video
-uploaded_file = st.file_uploader("Upload a video", type=["mp4"])
-
-# Metrics for performance
-def process_video(model_path, input_video_path):
-    model = YOLO(model_path)
-    device='cuda' if torch.cuda.is_available() else 'cpu'
-    model.to(device) 
+    class_indices = [i for i, name in model.names.items() if name in class_filter]
     class_list = model.names
-    cap = cv2.VideoCapture(input_video_path)
-    
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error(f"Could not open video for {model_name}.")
+        return None, None, None
+
+    w, h = int(cap.get(3)), int(cap.get(4))
+    line_y = 430
+    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    writer = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), 20, (w, h))
+
     count_class = defaultdict(int)
     crossed_ids = {}
-    frame_number = 0
-    total_fps = 0
-    total_inference_time = 0
-    line_yellow = 430
-
+    frame_num = 0
     fps_list = []
-    memory_list = []
+    inf_times = []
+    prev_time = time.time()
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    progress = st.progress(0)
+    processed = 0
 
-    process = psutil.Process(os.getpid())
-
+    results = None
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame_number += 1
-        if frame_number % 4 != 0:
-            continue
+        frame_num += 1
 
-        mem_before = process.memory_info().rss / (1024 ** 2)
+        if frame_num % 4 == 0:
+            start = time.time()
+            results = model.track(frame, persist=True, verbose=False, classes=class_indices)
+            inf_times.append((time.time() - start) * 1000)
 
-        start_time = time.time()
-        results = model.track(frame, persist=True, verbose=False, classes=[2, 3, 5])
-        end_time = time.time()
+        cv2.line(frame, (550, line_y), (1100, line_y), (0, 255, 255), 3)
 
-        mem_after = process.memory_info().rss / (1024 ** 2)
-        mem_used = mem_after - mem_before
-        memory_list.append(mem_used)
-
-        inference_time = end_time - start_time
-        fps = 1 / inference_time if inference_time > 0 else 0
-        fps_list.append(fps)
-
-        total_inference_time += inference_time
-        total_fps += fps
-
-        if results and results[0].boxes and len(results[0].boxes.xyxy) > 0:
+        if results and results[0].boxes:
             boxes = results[0].boxes.xyxy.cpu()
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            class_indices = results[0].boxes.cls.int().cpu().tolist()
+            ids = results[0].boxes.id.int().cpu().tolist()
+            classes = results[0].boxes.cls.int().cpu().tolist()
 
-            for track_id, class_idx in zip(track_ids, class_indices):
-                class_name = class_list[class_idx]
-                if track_id not in crossed_ids:
+            for box, track_id, class_idx in zip(boxes, ids, classes):
+                x1, y1, x2, y2 = map(int, box)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                name = class_list[class_idx]
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"ID: {track_id} {name}", (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+
+                if track_id not in crossed_ids and cy > line_y:
                     crossed_ids[track_id] = True
-                    count_class[class_name] += 1
+                    count_class[name] += 1
+
+        curr_time = time.time()
+        fps = 1 / (curr_time - prev_time + 1e-5)
+        prev_time = curr_time
+        fps_list.append(fps)
+        cv2.putText(frame, f"FPS: {int(fps)}", (600, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        y_offset = 30
+        for cls, count in count_class.items():
+            cv2.putText(frame, f"{cls}: {count}", (50, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
+            cv2.putText(frame, f"{cls}: {count}", (50, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            y_offset += 30
+
+        writer.write(frame)
+        processed += 1
+        progress.progress(min(processed / total, 1.0))
 
     cap.release()
+    writer.release()
 
-    total_frames = len(fps_list)
-    avg_fps = total_fps / total_frames if total_frames > 0 else 0
-    avg_inference_ms = (total_inference_time / total_frames * 1000) if total_frames > 0 else 0
-    avg_memory_mb = sum(memory_list) / total_frames if total_frames > 0 else 0
+    if os.path.exists(temp_out):
+        if reencode_video(temp_out, output_path):
+            os.unlink(temp_out)
+        else:
+            os.unlink(temp_out)
+            return None, None, None
 
-    return dict(count_class), round(avg_fps, 2), round(avg_inference_ms, 2), round(avg_memory_mb, 2), fps_list, memory_list
+    return count_class, round(np.mean(fps_list), 2), round(np.mean(inf_times), 2)
 
-# Run analysis
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmpfile:
-        tmpfile.write(uploaded_file.read())
-        tmp_path = tmpfile.name
+# File upload
+uploaded_file = st.file_uploader(" Upload a video", type=["mp4", "avi", "mov"])
 
-    st.info(f"Processing video using {model_choice}...")
-    with st.spinner("Running detection..."):
-        class_counts, avg_fps, avg_inference_ms, avg_memory_mb, fps_list, memory_list = process_video(model_path, tmp_path)
+if uploaded_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp.write(uploaded_file.read())
+        input_path = tmp.name
 
-    st.success("Detection complete.")
-    st.subheader(" Performance Summary")
-    st.markdown(f"**Model:** {model_choice}")
-    st.markdown(f"**Average FPS:** {avg_fps}")
-    st.markdown(f"**Average Inference Time:** {avg_inference_ms} ms/frame")
-    st.markdown(f"**Average Memory Usage:** {avg_memory_mb} MB/frame")
+    output_y11 = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    output_y12 = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
 
-    st.subheader(" Inference Time & Memory Usage Graphs")
+    classes = ["car", "motorcycle", "bus"]
 
-    fig_fps = go.Figure()
-    fig_fps.add_trace(go.Scatter(y=fps_list, mode='lines+markers', name='FPS/frame'))
-    fig_fps.update_layout(title='Frame-wise FPS', xaxis_title='Frame', yaxis_title='FPS')
+    st.write("Processing with YOLO11...")
+    counts11, fps11, inf11 = process_video(input_path, "yolo11l", output_y11, classes)
 
-    fig_mem = go.Figure()
-    fig_mem.add_trace(go.Scatter(y=memory_list, mode='lines+markers', name='Memory (MB)'))
-    fig_mem.update_layout(title='Frame-wise Memory Usage', xaxis_title='Frame', yaxis_title='Memory (MB)')
+    st.write("Processing with YOLO12...")
+    counts12, fps12, inf12 = process_video(input_path, "yolo12l", output_y12, classes)
 
-    st.plotly_chart(fig_fps, use_container_width=True)
-    st.plotly_chart(fig_mem, use_container_width=True)
+    # Video results
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("YOLO11 Output")
+        if os.path.exists(output_y11):
+            st.video(output_y11)
+    with col2:
+        st.subheader("YOLO12 Output")
+        if os.path.exists(output_y12):
+            st.video(output_y12)
 
-    st.subheader(" Detected Object Counts")
-    st.json(class_counts)
+    if counts11 and counts12:
+        st.subheader("Performance Metrics")
+        metrics = pd.DataFrame({
+            "Model": ["YOLO11", "YOLO12"],
+            "Average FPS": [fps11, fps12],
+            "Inference Time (ms)": [inf11, inf12]
+        })
+        st.table(metrics.style.format({
+            "Average FPS": "{:.2f}",
+            "Inference Time (ms)": "{:.2f}"
+        }).set_table_styles([{'selector': 'th', 'props': [('font-weight', 'bold')]}]))
+
+        st.subheader("Vehicle Counts")
+        count_df = pd.DataFrame({
+            "Class": classes,
+            "YOLO11": [counts11.get(cls, 0) for cls in classes],
+            "YOLO12": [counts12.get(cls, 0) for cls in classes]
+        })
+        st.table(count_df.style.set_table_styles([{'selector': 'th', 'props': [('font-weight', 'bold')]}]))
+
+        # Bar chart
+        fig, ax = plt.subplots()
+        count_df.set_index("Class")[["YOLO11", "YOLO12"]].plot(kind="bar", ax=ax)
+        ax.set_title("Vehicle Counts by Class")
+        ax.set_ylabel("Count")
+        st.pyplot(fig)
+
+# Clean up
+for f in [input_path, output_y11, output_y12]:
+    if f and os.path.exists(f):
+        try:
+            os.unlink(f)
+        except:
+            pass
