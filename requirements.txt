@@ -1,5 +1,7 @@
 opencv-python-headless
+streamlit
 ultralytics
-plotly
-lap
-ffmpeg
+ffmpeg-python
+pandas
+numpy
+matplotlib
