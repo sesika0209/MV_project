@@ -1,4 +1,4 @@
-import streamlit as st
+    import streamlit as st
 import cv2
 import time
 import tempfile
@@ -177,9 +177,10 @@ if uploaded_file:
         st.pyplot(fig)
 
 # Clean up
-for f in [input_path, output_y11, output_y12]:
-    if f and os.path.exists(f):
+for f in ['input_path', 'output_y11', 'output_y12']:
+    file_var = globals().get(f)
+    if file_var and os.path.exists(file_var):
         try:
-            os.unlink(f)
-        except:
-            pass
+            os.unlink(file_var)
+        except Exception as e:
+            st.warning(f"Failed to delete {f}: {e}")
